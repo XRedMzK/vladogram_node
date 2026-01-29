@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vladogram</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app-shell" class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <button id="menu-btn" class="icon-btn" type="button" aria-label="Открыть меню">
+            <span class="burger" aria-hidden="true"></span>
+          </button>
+          <div class="brand">
+            <span class="brand-mark">VG</span>
+            <span class="brand-name">Vladogram</span>
+          </div>
+          <div id="socket-status" class="socket-pill">Офлайн</div>
+        </div>
+
+        <div class="sidebar-search">
+          <input id="chat-search" type="text" placeholder="Поиск по чатам" />
+        </div>
+
+        <div id="chat-list" class="chat-list"></div>
+
+        <form id="chat-create-form" class="chat-create">
+          <input id="new-chat-id" type="number" min="1" placeholder="ID чата" />
+          <input id="new-chat-peer" type="text" placeholder="Ник собеседника" />
+          <button type="submit">Открыть</button>
+        </form>
+      </aside>
+
+      <main class="main">
+        <header class="chat-header">
+          <div class="chat-peer">
+            <div id="chat-title" class="chat-peer-name">Чат не выбран</div>
+            <div class="chat-peer-meta">
+              <span id="chat-peer" class="muted">Был(а) в сети: -</span>
+              <span id="chat-connection" class="status">Отключен</span>
+            </div>
+          </div>
+          <button id="chat-back" type="button" class="ghost-btn">Назад</button>
+        </header>
+
+        <div id="chat-empty" class="chat-empty is-visible">
+          <div class="chat-empty-card">
+            <h2>Выберите чат</h2>
+            <p>Найдите или откройте чат слева, чтобы начать переписку.</p>
+          </div>
+        </div>
+
+        <div id="messages" class="messages"></div>
+        <div id="typing-status" class="typing status"></div>
+
+        <form id="message-form" class="composer">
+          <div class="attach-wrapper">
+            <button id="attach-btn" type="button" class="icon-btn" aria-label="Прикрепить">
+              <span class="icon">+</span>
+            </button>
+            <div id="attach-menu" class="attach-menu is-hidden">
+              <button type="button" data-attach="image">Изображение</button>
+              <button type="button" data-attach="document">Документ</button>
+            </div>
+            <input id="attach-image" type="file" accept="image/*" class="is-hidden" />
+            <input id="attach-doc" type="file" class="is-hidden" />
+          </div>
+          <input
+            id="message-input"
+            type="text"
+            placeholder="Введите сообщение..."
+            autocomplete="off"
+          />
+          <button id="send-btn" type="submit" class="send-btn">Отправить</button>
+        </form>
+        <div id="attach-status" class="status attach-status"></div>
+      </main>
+    </div>
+
+    <section id="auth-screen" class="auth-screen is-visible">
+      <div class="auth-card">
+        <div class="auth-title">
+          <h1>Добро пожаловать в Vladogram</h1>
+          <p>Зарегистрируйте ник, включите TOTP и войдите.</p>
+        </div>
+        <div id="crypto-warning" class="status"></div>
+        <div class="auth-grid">
+          <form id="register-form" class="auth-panel">
+            <h2>Создать аккаунт</h2>
+            <label>
+              Ник
+              <input id="register-nickname" type="text" placeholder="ник" autocomplete="username" />
+            </label>
+            <button type="submit">Создать</button>
+            <div id="register-status" class="status"></div>
+            <div id="register-qr" class="qr-block is-hidden">
+              <img id="qr-image" alt="QR для TOTP" />
+              <div class="muted">Ссылка вручную:</div>
+              <div id="otpauth-url" class="mono"></div>
+            </div>
+          </form>
+
+          <form id="verify-form" class="auth-panel">
+            <h2>Включить TOTP</h2>
+            <label>
+              Ник
+              <input id="verify-nickname" type="text" placeholder="ник" autocomplete="username" />
+            </label>
+            <label>
+              Код
+              <input
+                id="verify-code"
+                type="text"
+                placeholder="123 456"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+              />
+            </label>
+            <button type="submit">Подтвердить</button>
+            <div id="verify-status" class="status"></div>
+          </form>
+
+          <form id="login-form" class="auth-panel">
+            <h2>Войти</h2>
+            <label>
+              Ник
+              <input id="login-nickname" type="text" placeholder="ник" autocomplete="username" />
+            </label>
+            <label>
+              Код
+              <input
+                id="login-code"
+                type="text"
+                placeholder="123 456"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+              />
+            </label>
+            <button type="submit">Войти</button>
+            <div id="login-status" class="status"></div>
+            <pre id="login-output" class="mono"></pre>
+          </form>
+
+          <form id="refresh-form" class="auth-panel small">
+            <h2>Обновить сессию</h2>
+            <p class="muted">Используйте после повторного открытия вкладки.</p>
+            <button type="submit">Обновить</button>
+            <div id="refresh-status" class="status"></div>
+            <pre id="refresh-output" class="mono"></pre>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <div id="menu-modal" class="modal">
+      <div class="modal-backdrop" data-close="menu"></div>
+      <div class="modal-panel">
+        <button class="modal-close" type="button" data-close="menu" aria-label="Закрыть">x</button>
+        <div class="profile-block">
+          <div id="menu-avatar" class="avatar">?</div>
+          <div id="menu-nickname" class="profile-name">Гость</div>
+        </div>
+        <button id="open-settings-btn" type="button" class="menu-btn">Настройки</button>
+      </div>
+    </div>
+
+    <div id="settings-modal" class="modal">
+      <div class="modal-backdrop" data-close="settings"></div>
+      <div class="modal-panel settings-panel">
+        <button class="modal-close" type="button" data-close="settings" aria-label="Закрыть">x</button>
+        <h2>Настройки</h2>
+
+        <div class="settings-section">
+          <div class="settings-head">
+            <div>
+              <strong>Подключить новое устройство</strong>
+              <div class="muted">Сгенерируйте QR на новом устройстве.</div>
+            </div>
+            <button id="pairing-start-btn" type="button">Сгенерировать QR</button>
+          </div>
+          <div id="pairing-qr-block" class="qr-block is-hidden">
+            <img id="pairing-qr-image" alt="QR для подключения" />
+            <div class="muted">Данные для подключения:</div>
+            <div id="pairing-qr-text" class="mono"></div>
+          </div>
+          <div id="pairing-code-new" class="status"></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-head">
+            <div>
+              <strong>Подключить существующее устройство</strong>
+              <div class="muted">Вставьте данные QR с нового устройства.</div>
+            </div>
+            <button id="pairing-accept-btn" type="button" class="secondary">Принять</button>
+          </div>
+          <label>
+            Данные QR
+            <textarea id="pairing-input" rows="4" placeholder='{"pairingId":123,"pubkey_new":{...}}'></textarea>
+          </label>
+          <div id="pairing-code-old" class="status"></div>
+          <button id="pairing-confirm-btn" type="button" class="secondary">Подтвердить и отправить ключи</button>
+          <div id="pairing-transfer-status" class="status"></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-head danger">
+            <div>
+              <strong>Сменить точку</strong>
+              <div class="muted">Очистить чаты, сбросить epoch, отозвать устройства.</div>
+            </div>
+            <button id="change-point-btn" type="button" class="danger-btn">Сбросить</button>
+          </div>
+          <div class="settings-head">
+            <div>
+              <strong>Выйти</strong>
+              <div class="muted">Отозвать refresh-сессию.</div>
+            </div>
+            <button id="logout-btn" type="button">Выйти</button>
+          </div>
+          <div id="settings-status" class="status"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="socket.io/socket.io.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
