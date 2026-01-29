@@ -35,3 +35,6 @@ Thumbs.db
 
 # Local secrets
 secret
+
+# Docs
+SYSTEM_RULES.md

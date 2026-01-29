@@ -1,5 +1,10 @@
 # Правила системы
 
+## Base Path
+- Все HTTP и WS запросы идут с префиксом `/vladogram`.
+- Статика подключается относительными путями (например, `styles.css`, `app.js`).
+- Socket.IO path: `/vladogram/socket.io`.
+
 ## Реалтайм
 - Протокол: WebSocket; для старта использовать Socket.IO.
 - WS handshake проверяет access JWT.
@@ -22,7 +27,9 @@
 ## Сессии
 - Access: JWT 5–15 минут.
 - Refresh: 30–90 дней, хранить в БД хэш, raw не хранить.
-- Refresh cookie: HttpOnly; при cookie включать CSRF (double-submit).
+- Refresh cookie: HttpOnly, SameSite=Lax, Path=/vladogram; Secure в проде.
+- CSRF cookie: HttpOnly, SameSite=Lax, Path=/vladogram; Secure в проде.
+- CSRF токен выдаётся в JSON и хранится на клиенте, отправляется в заголовке/теле.
 - /auth/refresh → новый access, /auth/logout → revoke refresh.
 
 ## Мульти-девайс
