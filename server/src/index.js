@@ -8,6 +8,7 @@ const {
   initDb,
   ensureTestUser,
   ensureChat,
+  ensureDirectChat,
   getUserByNickname,
   createUserWithTotp,
   getTotpByUserId,
@@ -20,6 +21,7 @@ const {
   listMessagesByChat,
   ensureChatMember,
   isChatMember,
+  listChatsByUserId,
   deleteChatMembersByUser,
   deleteMessagesByUser,
   revokeSessionsByUser,
@@ -30,6 +32,9 @@ const {
   getPairingById,
   updatePairingAccept,
   updatePairingPayload,
+  createLoginCode,
+  getLoginCodeByHash,
+  markLoginCodeUsed,
   getSessionByRefreshHash,
   updateSessionRefresh,
   revokeSession
@@ -102,6 +107,7 @@ const MAX_DELAY_MS = 2000;
 const REFRESH_COOKIE = 'refresh_token';
 const CSRF_COOKIE = 'csrf_token';
 const PAIRING_TTL_MS = 10 * 60 * 1000;
+const LOGIN_CODE_TTL_MS = 10 * 60 * 1000;
 
 function getAttemptKey(req, nickname) {
   return `${req.ip || 'unknown'}:${nickname}`;
@@ -151,6 +157,12 @@ function sleep(ms) {
 
 function isExpired(expiresAt) {
   return new Date(expiresAt).getTime() <= Date.now();
+}
+
+function getChatById(dbRef, chatId) {
+  return dbRef
+    .prepare('SELECT id, epoch, created_at FROM chats WHERE id = ?')
+    .get(chatId);
 }
 
 function getCsrfFromRequest(req) {
@@ -297,6 +309,7 @@ apiRouter.post('/auth/login', loginLimiter, async (req, res, next) => {
   try {
     const nickname = String(req.body?.nickname || '').trim();
     const code = normalizeToken(req.body?.code);
+    const loginCode = String(req.body?.login_code || '').trim();
     if (!nickname || !code) {
       return res.status(400).json({ error: 'invalid_request' });
     }
@@ -333,6 +346,34 @@ apiRouter.post('/auth/login', loginLimiter, async (req, res, next) => {
       return res.status(401).json({ error: 'invalid_code' });
     }
 
+    const devices = listDevicesByUserId(db, user.id);
+    const requireLoginCode = devices.length > 0;
+    if (requireLoginCode && !loginCode) {
+      recordFailure(attemptKey);
+      return res.status(400).json({ error: 'login_code_required' });
+    }
+
+    let loginPayload = null;
+    if (loginCode) {
+      const codeHash = hashToken(loginCode);
+      const loginRecord = getLoginCodeByHash(db, codeHash);
+      if (
+        !loginRecord ||
+        loginRecord.used ||
+        loginRecord.user_id !== user.id ||
+        isExpired(loginRecord.expires_at)
+      ) {
+        recordFailure(attemptKey);
+        return res.status(401).json({ error: 'invalid_login_code' });
+      }
+      markLoginCodeUsed(db, loginRecord.id);
+      loginPayload = {
+        ciphertext: normalizeBlob(loginRecord.payload_ciphertext),
+        nonce: normalizeBlob(loginRecord.payload_nonce),
+        meta: loginRecord.payload_meta ? JSON.parse(loginRecord.payload_meta) : null
+      };
+    }
+
     clearAttempts(attemptKey);
     const accessToken = createAccessToken(user);
     const refreshToken = createRefreshToken();
@@ -363,10 +404,41 @@ apiRouter.post('/auth/login', loginLimiter, async (req, res, next) => {
       payload.refresh_expires_at = refreshExpiresAt;
     }
 
+    if (loginPayload) {
+      payload.login_payload = loginPayload;
+    }
+
     return res.json(payload);
   } catch (err) {
     return next(err);
   }
+});
+
+apiRouter.post('/auth/login-code', requireAuth, (req, res) => {
+  const code = String(req.body?.code || '').trim();
+  if (!code || code.length < 6) {
+    return res.status(400).json({ error: 'invalid_login_code' });
+  }
+
+  const payloadCiphertext = req.body?.payload_ciphertext || null;
+  const payloadNonce = req.body?.payload_nonce || null;
+  const payloadMeta = req.body?.payload_meta
+    ? JSON.stringify(req.body.payload_meta)
+    : null;
+  const codeHash = hashToken(code);
+  const expiresAt = new Date(Date.now() + LOGIN_CODE_TTL_MS).toISOString();
+
+  db.prepare('UPDATE login_codes SET used = 1 WHERE user_id = ?').run(req.user.id);
+  createLoginCode(db, {
+    userId: req.user.id,
+    codeHash,
+    expiresAt,
+    payloadCiphertext,
+    payloadNonce,
+    payloadMeta
+  });
+
+  return res.json({ status: 'created', expires_at: expiresAt });
 });
 
 apiRouter.post('/auth/refresh', (req, res) => {
@@ -454,6 +526,15 @@ apiRouter.get('/me', requireAuth, (req, res) => {
     nickname: req.user.nickname,
     epoch
   });
+});
+
+apiRouter.get('/chats', requireAuth, (req, res) => {
+  const rows = listChatsByUserId(db, req.user.id).map((row) => ({
+    chat_id: row.chat_id,
+    peer_nickname: row.peer_nickname,
+    last_message_at: row.last_message_at
+  }));
+  return res.json({ chats: rows });
 });
 
 apiRouter.post('/auth/reset', requireAuth, (req, res) => {
@@ -654,13 +735,34 @@ apiRouter.get('/chats/:id/messages', requireAuth, (req, res) => {
   return res.json({ chatId, messages: rows.reverse() });
 });
 
+apiRouter.post('/chats/direct', requireAuth, (req, res) => {
+  const peerNickname = String(req.body?.nickname || '').trim();
+  if (!peerNickname) {
+    return res.status(400).json({ error: 'missing_nickname' });
+  }
+  const peer = getUserByNickname(db, peerNickname);
+  if (!peer) {
+    return res.status(404).json({ error: 'user_not_found' });
+  }
+  if (peer.id === req.user.id) {
+    return res.status(400).json({ error: 'self_chat_not_allowed' });
+  }
+  const chat = ensureDirectChat(db, req.user.id, peer.id, 1);
+  return res.json({ chat_id: chat.id, peer_nickname: peer.nickname });
+});
+
 apiRouter.post('/chats/:id/join', requireAuth, (req, res) => {
   const chatId = parseChatId(req.params.id);
   if (!chatId) {
     return res.status(400).json({ error: 'invalid_chat_id' });
   }
-  ensureChat(db, chatId);
-  ensureChatMember(db, chatId, req.user.id);
+  const chat = getChatById(db, chatId);
+  if (!chat) {
+    return res.status(404).json({ error: 'chat_not_found' });
+  }
+  if (!isChatMember(db, chatId, req.user.id)) {
+    return res.status(403).json({ error: 'not_chat_member' });
+  }
   return res.json({ status: 'joined', chatId });
 });
 
@@ -709,8 +811,11 @@ io.on('connection', (socket) => {
     if (!chatId) {
       return;
     }
+    if (!isChatMember(db, chatId, user.id)) {
+      socket.emit('chat:error', { chatId, error: 'not_chat_member' });
+      return;
+    }
     socket.join(chatRoom(chatId));
-    ensureChatMember(db, chatId, user.id);
     socket.emit('chat:joined', { chatId });
   });
 
@@ -770,9 +875,19 @@ io.on('connection', (socket) => {
       }
       return;
     }
-
-    ensureChat(db, chatId);
-    ensureChatMember(db, chatId, user.id);
+    const chat = getChatById(db, chatId);
+    if (!chat) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'chat_not_found' });
+      }
+      return;
+    }
+    if (!isChatMember(db, chatId, user.id)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'not_chat_member' });
+      }
+      return;
+    }
     socket.join(chatRoom(chatId));
 
     const sentAt = new Date().toISOString();

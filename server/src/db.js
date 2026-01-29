@@ -99,6 +99,35 @@ function ensureChat(db, chatId = 1) {
   return { id: chatId, epoch: 1 };
 }
 
+function createChat(db, epoch = 1) {
+  const info = db.prepare('INSERT INTO chats (epoch) VALUES (?)').run(epoch);
+  return { id: info.lastInsertRowid, epoch };
+}
+
+function findDirectChatId(db, userId, peerId) {
+  const row = db
+    .prepare(
+      `SELECT cm1.chat_id AS chat_id
+       FROM chat_members cm1
+       JOIN chat_members cm2 ON cm1.chat_id = cm2.chat_id
+       WHERE cm1.user_id = ? AND cm2.user_id = ?
+       LIMIT 1`
+    )
+    .get(userId, peerId);
+  return row ? row.chat_id : null;
+}
+
+function ensureDirectChat(db, userId, peerId, epoch = 1) {
+  const existingId = findDirectChatId(db, userId, peerId);
+  if (existingId) {
+    return { id: existingId, epoch };
+  }
+  const chat = createChat(db, epoch);
+  ensureChatMember(db, chat.id, userId);
+  ensureChatMember(db, chat.id, peerId);
+  return chat;
+}
+
 function getUserByNickname(db, nickname) {
   return db
     .prepare('SELECT id, nickname, created_at FROM users WHERE nickname = ?')
@@ -206,6 +235,25 @@ function listMessagesByChat(db, chatId, limit = 50) {
     .all(chatId, limit);
 }
 
+function listChatsByUserId(db, userId) {
+  return db
+    .prepare(
+      `SELECT cm.chat_id AS chat_id,
+              u.nickname AS peer_nickname,
+              MAX(m.sent_at) AS last_message_at
+       FROM chat_members cm
+       JOIN users u ON u.id = cm.user_id
+       LEFT JOIN messages m ON m.chat_id = cm.chat_id
+       WHERE cm.chat_id IN (
+         SELECT chat_id FROM chat_members WHERE user_id = ?
+       )
+       AND cm.user_id != ?
+       GROUP BY cm.chat_id, u.nickname
+       ORDER BY last_message_at DESC, cm.chat_id DESC`
+    )
+    .all(userId, userId);
+}
+
 function deleteChatMembersByUser(db, userId) {
   return db.prepare('DELETE FROM chat_members WHERE user_id = ?').run(userId);
 }
@@ -300,6 +348,40 @@ function updatePairingPayload(db, pairingId, payload) {
     );
 }
 
+function createLoginCode(db, {
+  userId,
+  codeHash,
+  expiresAt,
+  payloadCiphertext,
+  payloadNonce,
+  payloadMeta
+}) {
+  return db
+    .prepare(
+      `INSERT INTO login_codes
+        (user_id, code_hash, payload_ciphertext, payload_nonce, payload_meta, expires_at, used)
+       VALUES (?, ?, ?, ?, ?, ?, 0)`
+    )
+    .run(userId, codeHash, payloadCiphertext, payloadNonce, payloadMeta, expiresAt);
+}
+
+function getLoginCodeByHash(db, codeHash) {
+  return db
+    .prepare(
+      `SELECT id, user_id, code_hash, payload_ciphertext, payload_nonce, payload_meta,
+              expires_at, used
+       FROM login_codes
+       WHERE code_hash = ?`
+    )
+    .get(codeHash);
+}
+
+function markLoginCodeUsed(db, codeId) {
+  return db
+    .prepare('UPDATE login_codes SET used = 1 WHERE id = ?')
+    .run(codeId);
+}
+
 function getSessionByRefreshHash(db, refreshHash) {
   return db
     .prepare(
@@ -326,6 +408,9 @@ module.exports = {
   initDb,
   ensureTestUser,
   ensureChat,
+  createChat,
+  findDirectChatId,
+  ensureDirectChat,
   getUserByNickname,
   createUserWithTotp,
   getTotpByUserId,
@@ -338,6 +423,7 @@ module.exports = {
   ensureChatMember,
   isChatMember,
   listMessagesByChat,
+  listChatsByUserId,
   deleteChatMembersByUser,
   deleteMessagesByUser,
   revokeSessionsByUser,
@@ -348,6 +434,9 @@ module.exports = {
   getPairingById,
   updatePairingAccept,
   updatePairingPayload,
+  createLoginCode,
+  getLoginCodeByHash,
+  markLoginCodeUsed,
   getSessionByRefreshHash,
   updateSessionRefresh,
   revokeSession

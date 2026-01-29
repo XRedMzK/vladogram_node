@@ -211,7 +211,6 @@ h3,
   text-align: left;
   cursor: pointer;
   transition: transform 0.2s ease, background 0.2s ease;
-  animation: liftIn 0.3s ease;
 }
 
 .chat-item:hover {

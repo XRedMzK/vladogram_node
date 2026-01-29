@@ -18,7 +18,6 @@ const socketStatus = document.getElementById('socket-status');
 const chatSearchInput = document.getElementById('chat-search');
 const chatList = document.getElementById('chat-list');
 const chatCreateForm = document.getElementById('chat-create-form');
-const newChatIdInput = document.getElementById('new-chat-id');
 const newChatPeerInput = document.getElementById('new-chat-peer');
 
 const chatTitle = document.getElementById('chat-title');
@@ -46,6 +45,7 @@ const verifyNickname = document.getElementById('verify-nickname');
 const verifyCode = document.getElementById('verify-code');
 const loginNickname = document.getElementById('login-nickname');
 const loginCode = document.getElementById('login-code');
+const loginOneTime = document.getElementById('login-one-time');
 
 const registerStatus = document.getElementById('register-status');
 const verifyStatus = document.getElementById('verify-status');
@@ -71,6 +71,9 @@ const pairingTransferStatus = document.getElementById('pairing-transfer-status')
 const changePointBtn = document.getElementById('change-point-btn');
 const logoutBtn = document.getElementById('logout-btn');
 const settingsStatus = document.getElementById('settings-status');
+const loginCodeBtn = document.getElementById('login-code-btn');
+const loginCodeValue = document.getElementById('login-code-value');
+const loginCodeStatus = document.getElementById('login-code-status');
 
 const state = {
   accessToken: '',
@@ -264,6 +267,10 @@ function parseJwt(token) {
   } catch {
     return null;
   }
+}
+
+function normalizeCode(value) {
+  return String(value || '').replace(/\s+/g, '').trim();
 }
 
 function toBase64(text) {
@@ -461,6 +468,64 @@ async function derivePairingKey({ privateJwk, peerPublicJwk, pairingId }) {
   );
 }
 
+async function deriveLoginCodeKey(code) {
+  const normalized = normalizeCode(code);
+  const material = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(normalized),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  const salt = textEncoder.encode('vladogram-login-code');
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
+function generateLoginCode() {
+  const value = crypto.getRandomValues(new Uint32Array(1))[0] % 1000000;
+  return String(value).padStart(6, '0');
+}
+
+async function encryptLoginPayload(code, payload) {
+  const key = await deriveLoginCodeKey(code);
+  const nonce = randomBase64(12);
+  const json = JSON.stringify(payload);
+  const cipherBuffer = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: base64ToBytes(nonce) },
+    key,
+    textEncoder.encode(json)
+  );
+  return {
+    ciphertext: bufferToBase64(cipherBuffer),
+    nonce,
+    meta: { version: payload?.version || 1, exported_at: payload?.exported_at }
+  };
+}
+
+async function decryptLoginPayload(code, payload) {
+  if (!payload?.ciphertext || !payload?.nonce) {
+    return null;
+  }
+  try {
+    const key = await deriveLoginCodeKey(code);
+    const plainBuffer = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: base64ToBytes(payload.nonce) },
+      key,
+      base64ToBytes(payload.ciphertext)
+    );
+    const json = new TextDecoder().decode(plainBuffer);
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
 async function computePairingCode(pairingKey, pairingId) {
   const raw = await crypto.subtle.exportKey('raw', pairingKey);
   const pairingBytes = textEncoder.encode(String(pairingId));
@@ -476,6 +541,10 @@ async function computePairingCode(pairingKey, pairingId) {
 async function ensureChatKey(chatId, peerNickname) {
   const existing = await getChatKeyRecord(chatId);
   if (existing?.keyJwk) {
+    if (peerNickname && !existing.peerNickname) {
+      existing.peerNickname = peerNickname;
+      await saveChatKeyRecord(existing);
+    }
     return existing;
   }
 
@@ -620,6 +689,10 @@ function clearAuth() {
   state.csrfToken = '';
   setAppValue('csrfToken', '').catch(() => {});
   updateUserUI();
+  if (loginCodeValue) {
+    loginCodeValue.textContent = '';
+  }
+  setStatus(loginCodeStatus, '');
   setAuthVisible(true);
   state.currentChatId = null;
   setChatActive(false);
@@ -644,7 +717,7 @@ function updateUserUI() {
 
 function getChatDisplayName(chat) {
   if (!chat) return 'Чат';
-  return chat.peerNickname || `Чат ${chat.id}`;
+  return chat.peerNickname || 'Чат';
 }
 
 function ensureChat(chatId, peerNickname = null) {
@@ -659,7 +732,7 @@ function ensureChat(chatId, peerNickname = null) {
   }
   const record = {
     id,
-    title: peerNickname || `Чат ${id}`,
+    title: peerNickname || 'Чат',
     peerNickname: peerNickname || null,
     peerDeviceId: null,
     lastMessageAt: null,
@@ -723,7 +796,7 @@ function renderChatList() {
   chatList.innerHTML = '';
   const filtered = sorted.filter((chat) => {
     const name = getChatDisplayName(chat).toLowerCase();
-    return !search || name.includes(search) || String(chat.id).includes(search);
+    return !search || name.includes(search);
   });
 
   if (filtered.length === 0) {
@@ -760,7 +833,7 @@ function renderChatList() {
 
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = chat.lastMessageAt ? formatTime(chat.lastMessageAt) : `Чат ${chat.id}`;
+    meta.textContent = chat.lastMessageAt ? formatTime(chat.lastMessageAt) : 'Новый чат';
 
     info.append(name, preview, meta);
 
@@ -770,7 +843,7 @@ function renderChatList() {
 
     item.append(avatar, info, time);
     item.addEventListener('click', () => {
-      navigateToChat(chat.id);
+      navigateToChat(chat);
     });
     chatList.appendChild(item);
   });
@@ -786,12 +859,31 @@ async function loadChatsFromStorage() {
   renderChatList();
 }
 
+async function loadChatsFromServer() {
+  if (!state.accessToken) return;
+  const { ok, data } = await getJson('/chats');
+  if (!ok || !data?.chats) {
+    return;
+  }
+  data.chats.forEach((row) => {
+    const chat = ensureChat(row.chat_id, row.peer_nickname || null);
+    if (row.last_message_at) {
+      const currentTime = chat.lastMessageAt ? Date.parse(chat.lastMessageAt) : 0;
+      const incomingTime = Date.parse(row.last_message_at);
+      if (!currentTime || (incomingTime && incomingTime > currentTime)) {
+        chat.lastMessageAt = row.last_message_at;
+      }
+    }
+  });
+  renderChatList();
+}
+
 function parseRoute() {
   const hash = window.location.hash || '#/chats';
   const parts = hash.replace(/^#\//, '').split('/');
   const name = parts[0] || 'chats';
   if (name === 'chat') {
-    return { name: 'chat', chatId: parts[1] };
+    return { name: 'chat', peer: parts[1] };
   }
   if (['auth', 'chats'].includes(name)) {
     return { name };
@@ -803,8 +895,71 @@ function navigateTo(route) {
   window.location.hash = route;
 }
 
-function navigateToChat(chatId) {
-  navigateTo(`#/chat/${chatId}`);
+function navigateToChat(chat) {
+  if (!chat) return;
+  const label = chat.peerNickname || chat.id || '';
+  if (!label) return;
+  navigateTo(`#/chat/${encodeURIComponent(label)}`);
+}
+
+function findChatByPeer(peerNickname) {
+  if (!peerNickname) return null;
+  const needle = peerNickname.toLowerCase();
+  return (
+    state.chats.find(
+      (chat) => chat.peerNickname && chat.peerNickname.toLowerCase() === needle
+    ) || null
+  );
+}
+
+async function openDirectChat(peerNickname, { navigate = false } = {}) {
+  const nickname = String(peerNickname || '').trim();
+  if (!nickname) return null;
+  if (!state.accessToken) {
+    showError(socketStatus, 'Нужен вход, чтобы открыть чат.');
+    return null;
+  }
+
+  const existing = findChatByPeer(nickname);
+  if (existing) {
+    if (navigate !== false) {
+      navigateToChat(existing);
+    }
+    await joinChat(existing.id, { silent: true });
+    return existing;
+  }
+
+  const { ok, data } = await postJson('/chats/direct', { nickname });
+  if (!ok) {
+    showError(socketStatus, `Не удалось открыть чат: ${data.error || 'неизвестно'}`);
+    return null;
+  }
+  const chat = ensureChat(data.chat_id, data.peer_nickname || nickname);
+  if (data.last_message_at) {
+    chat.lastMessageAt = data.last_message_at;
+  }
+  renderChatList();
+  if (navigate !== false) {
+    navigateToChat(chat);
+  }
+  await joinChat(chat.id, { silent: true });
+  return chat;
+}
+
+async function openChatFromRoute(peerToken) {
+  let nickname = String(peerToken || '').trim();
+  try {
+    nickname = decodeURIComponent(nickname);
+  } catch {
+    nickname = String(peerToken || '').trim();
+  }
+  if (!nickname) return;
+  const existing = findChatByPeer(nickname);
+  if (existing) {
+    await joinChat(existing.id, { silent: true });
+    return;
+  }
+  await openDirectChat(nickname, { navigate: false });
 }
 
 function updateSocketStatus(message, type) {
@@ -906,7 +1061,11 @@ function emitTypingStop() {
 async function joinChat(chatId, { silent } = {}) {
   if (!chatId) return;
   const id = String(chatId);
-  const chat = ensureChat(id);
+  let chat = ensureChat(id);
+  if (!chat.peerNickname) {
+    await loadChatsFromServer();
+    chat = ensureChat(id);
+  }
   state.currentChatId = id;
   setChatActive(true);
   updateChatHeader(id);
@@ -920,7 +1079,7 @@ async function joinChat(chatId, { silent } = {}) {
     socket.emit('chat:join', { chatId: id });
   }
   if (!silent) {
-    addMessageToUI(`Вы вошли в чат ${id}`, { system: true });
+    addMessageToUI(`Вы вошли в чат с ${getChatDisplayName(chat)}`, { system: true });
   }
 
   if (chat.peerNickname) {
@@ -937,17 +1096,22 @@ async function loadChatHistory(chatId) {
   if (!ok || !data?.messages) {
     return;
   }
+  const prevList = messagesByChat.get(String(chatId)) || [];
+  const prevLastId = prevList.length ? prevList[prevList.length - 1].id : null;
   const messages = [];
   for (const message of data.messages) {
     const decrypted = await decryptForChat(chatId, message.ciphertext, message.nonce);
     messages.push({ ...message, decrypted });
   }
+  const newLastId = messages.length ? messages[messages.length - 1].id : null;
+  const changed =
+    messages.length !== prevList.length || (newLastId && newLastId !== prevLastId);
   messagesByChat.set(String(chatId), messages);
   if (messages.length > 0) {
     const last = messages[messages.length - 1];
     const chat = ensureChat(chatId);
-  const isOwn =
-    state.user && String(last.sender_user_id) === String(state.user.sub);
+    const isOwn =
+      state.user && String(last.sender_user_id) === String(state.user.sub);
     chat.lastMessageAt = last.sent_at || new Date().toISOString();
     const previewText = last.decrypted || last.ciphertext || '';
     chat.lastMessageText = isOwn ? `Вы: ${previewText}` : previewText;
@@ -968,7 +1132,7 @@ async function loadChatHistory(chatId) {
       updateChatHeader(chatId);
     }
   }
-  if (String(state.currentChatId) === String(chatId)) {
+  if (changed && String(state.currentChatId) === String(chatId)) {
     renderMessages(chatId);
   }
 }
@@ -1023,7 +1187,7 @@ function connectSocket() {
   const accessToken = state.accessToken;
   socket = io({
     path: `${BASE_PATH}/socket.io`,
-    auth: { token: accessToken }
+    auth: { token: accessToken, deviceId: state.deviceId }
   });
 
   updateSocketStatus('Подключение...');
@@ -1213,6 +1377,7 @@ async function handleAuth(token) {
   setAuthVisible(false);
   await syncEpochFromServer();
   await ensureDeviceRegistered();
+  await loadChatsFromServer();
   connectSocket();
 }
 
@@ -1443,6 +1608,39 @@ async function sendPairingPayload() {
   showSuccess(pairingTransferStatus, 'Ключи отправлены. Завершите подключение на новом устройстве.');
 }
 
+async function createLoginCodeForAuth() {
+  if (!state.accessToken) {
+    showError(loginCodeStatus, 'Нужен вход.');
+    return;
+  }
+  if (!ensureCryptoAvailable(loginCodeStatus)) {
+    return;
+  }
+
+  const code = generateLoginCode();
+  const payload = await exportKeyMaterial();
+  const encrypted = await encryptLoginPayload(code, payload);
+  const { ok, data } = await postJson('/auth/login-code', {
+    code,
+    payload_ciphertext: encrypted.ciphertext,
+    payload_nonce: encrypted.nonce,
+    payload_meta: encrypted.meta
+  });
+  if (!ok) {
+    showError(loginCodeStatus, `Не удалось создать код: ${data.error || 'неизвестно'}`);
+    return;
+  }
+
+  if (loginCodeValue) {
+    loginCodeValue.textContent = code;
+  }
+  const expiresAt = data?.expires_at ? new Date(data.expires_at) : null;
+  const expiresLabel = expiresAt && !Number.isNaN(expiresAt.getTime())
+    ? expiresAt.toLocaleString()
+    : 'скоро';
+  showSuccess(loginCodeStatus, `Код создан. Действует до ${expiresLabel}.`);
+}
+
 registerForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const nickname = registerNickname.value.trim();
@@ -1477,7 +1675,7 @@ registerForm?.addEventListener('submit', async (event) => {
 verifyForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const nickname = verifyNickname.value.trim();
-  const code = verifyCode.value.trim();
+  const code = normalizeCode(verifyCode.value);
   setStatus(verifyStatus, '');
 
   if (!nickname || !code) {
@@ -1497,7 +1695,8 @@ verifyForm?.addEventListener('submit', async (event) => {
 loginForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const nickname = loginNickname.value.trim();
-  const code = loginCode.value.trim();
+  const code = normalizeCode(loginCode.value);
+  const oneTimeCode = normalizeCode(loginOneTime.value);
   setStatus(loginStatus, '');
   loginOutput.textContent = '';
 
@@ -1506,9 +1705,18 @@ loginForm?.addEventListener('submit', async (event) => {
     return;
   }
 
-  const { ok, data } = await postJson('/auth/login', { nickname, code });
+  const payload = { nickname, code };
+  if (oneTimeCode) {
+    payload.login_code = oneTimeCode;
+  }
+
+  const { ok, data } = await postJson('/auth/login', payload);
   if (!ok) {
-    showError(loginStatus, `Вход не удался: ${data.error || 'неизвестно'}`);
+    const message =
+      data.error === 'login_code_required'
+        ? 'Нужен одноразовый код для входа.'
+        : `Вход не удался: ${data.error || 'неизвестно'}`;
+    showError(loginStatus, message);
     return;
   }
 
@@ -1519,10 +1727,25 @@ loginForm?.addEventListener('submit', async (event) => {
   showSuccess(loginStatus, 'Вход выполнен.');
   loginOutput.textContent = JSON.stringify(data, null, 2);
 
+  if (data.login_payload && oneTimeCode) {
+    if (!ensureCryptoAvailable(loginStatus)) {
+      showError(loginStatus, 'Нужен HTTPS, чтобы расшифровать ключи.');
+    } else {
+      const decrypted = await decryptLoginPayload(oneTimeCode, data.login_payload);
+      if (decrypted) {
+        await importKeyMaterial(decrypted);
+        renderChatList();
+      } else {
+        showError(loginStatus, 'Не удалось расшифровать ключи. Проверьте код входа.');
+      }
+    }
+  }
+
   if (data.access_token) {
     await handleAuth(data.access_token);
     navigateTo('#/chats');
   }
+  loginOneTime.value = '';
 });
 
 async function refreshSession({ silent } = {}) {
@@ -1633,19 +1856,12 @@ document.addEventListener('keydown', (event) => {
 
 chatCreateForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
-  const value = newChatIdInput.value.trim();
-  if (!value) {
-    showError(socketStatus, 'Введите ID чата.');
+  const peerNickname = newChatPeerInput?.value.trim();
+  if (!peerNickname) {
+    showError(socketStatus, 'Введите ник собеседника.');
     return;
   }
-  const peerNickname = newChatPeerInput?.value.trim() || null;
-  ensureChat(value, peerNickname);
-  renderChatList();
-  if (peerNickname) {
-    await ensureChatKey(value, peerNickname);
-  }
-  navigateToChat(value);
-  if (newChatIdInput) newChatIdInput.value = '';
+  navigateTo(`#/chat/${encodeURIComponent(peerNickname)}`);
   if (newChatPeerInput) newChatPeerInput.value = '';
 });
 
@@ -1694,7 +1910,10 @@ messageForm?.addEventListener('submit', async (event) => {
 
   const encrypted = await encryptForChat(state.currentChatId, text);
   if (!encrypted) {
-    updateSocketStatus('Нет ключа чата.', 'error');
+    updateSocketStatus(
+      'Нет ключа чата. Проверьте ник собеседника и импорт ключей.',
+      'error'
+    );
     return;
   }
 
@@ -1729,6 +1948,11 @@ pairingAcceptBtn?.addEventListener('click', async () => {
 
 pairingConfirmBtn?.addEventListener('click', async () => {
   await sendPairingPayload();
+});
+
+loginCodeBtn?.addEventListener('click', async () => {
+  setStatus(loginCodeStatus, '');
+  await createLoginCodeForAuth();
 });
 
 async function resetKeys() {
@@ -1801,16 +2025,17 @@ function handleRouteChange() {
 
   if (!state.accessToken) {
     setAuthVisible(true);
-  } else {
-    setAuthVisible(false);
+    return;
   }
 
+  setAuthVisible(false);
+
   if (route.name === 'chat') {
-    if (!route.chatId) {
+    if (!route.peer) {
       navigateTo('#/chats');
       return;
     }
-    joinChat(route.chatId, { silent: true }).catch(() => {});
+    openChatFromRoute(route.peer).catch(() => {});
   } else {
     state.currentChatId = null;
     setChatActive(false);

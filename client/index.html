@@ -33,9 +33,8 @@
         <div id="chat-list" class="chat-list"></div>
 
         <form id="chat-create-form" class="chat-create">
-          <input id="new-chat-id" type="number" min="1" placeholder="ID чата" />
           <input id="new-chat-peer" type="text" placeholder="Ник собеседника" />
-          <button type="submit">Открыть</button>
+          <button type="submit">Открыть чат</button>
         </form>
       </aside>
 
@@ -144,6 +143,15 @@
                 autocomplete="one-time-code"
               />
             </label>
+            <label>
+              Одноразовый код
+              <input
+                id="login-one-time"
+                type="text"
+                placeholder="код входа"
+                autocomplete="one-time-code"
+              />
+            </label>
             <button type="submit">Войти</button>
             <div id="login-status" class="status"></div>
             <pre id="login-output" class="mono"></pre>
@@ -177,6 +185,18 @@
       <div class="modal-panel settings-panel">
         <button class="modal-close" type="button" data-close="settings" aria-label="Закрыть">x</button>
         <h2>Настройки</h2>
+
+        <div class="settings-section">
+          <div class="settings-head">
+            <div>
+              <strong>Одноразовый код для входа</strong>
+              <div class="muted">Создайте код и передайте его для входа на другом устройстве.</div>
+            </div>
+            <button id="login-code-btn" type="button">Создать код</button>
+          </div>
+          <div id="login-code-value" class="mono"></div>
+          <div id="login-code-status" class="status"></div>
+        </div>
 
         <div class="settings-section">
           <div class="settings-head">
