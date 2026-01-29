@@ -667,7 +667,7 @@ apiRouter.post('/chats/:id/join', requireAuth, (req, res) => {
 app.use(BASE_PATH, apiRouter);
 app.use(apiRouter);
 
-const server = http.createServer();
+const server = http.createServer(app);
 const io = new Server(server, {
   path: `${BASE_PATH}/socket.io`,
   cors: {
@@ -675,7 +675,6 @@ const io = new Server(server, {
     credentials: true
   }
 });
-server.on('request', app);
 
 io.use((socket, next) => {
   const token =
