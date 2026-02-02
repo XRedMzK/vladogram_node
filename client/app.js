@@ -2,8 +2,14 @@ const appShell = document.getElementById('app-shell');
 const authScreen = document.getElementById('auth-screen');
 const cryptoWarning = document.getElementById('crypto-warning');
 
-const BASE_PATH = '/vladogram';
+const BASE_PATH = (() => {
+  if (window.__BASE_PATH__) return window.__BASE_PATH__;
+  const pathname = window.location.pathname || '/';
+  return pathname.startsWith('/vladogram') ? '/vladogram' : '';
+})();
 const api = (p) => `${BASE_PATH}${p.startsWith('/') ? '' : '/'}${p}`;
+
+const INSECURE_LOCAL = window.location.protocol === 'http:' && !window.isSecureContext;
 
 const menuBtn = document.getElementById('menu-btn');
 const menuModal = document.getElementById('menu-modal');
@@ -24,6 +30,7 @@ const chatTitle = document.getElementById('chat-title');
 const chatConnection = document.getElementById('chat-connection');
 const chatPeer = document.getElementById('chat-peer');
 const chatBack = document.getElementById('chat-back');
+const aliasBtn = document.getElementById('alias-btn');
 const chatEmpty = document.getElementById('chat-empty');
 const typingStatus = document.getElementById('typing-status');
 const messagesEl = document.getElementById('messages');
@@ -34,29 +41,30 @@ const attachMenu = document.getElementById('attach-menu');
 const attachImageInput = document.getElementById('attach-image');
 const attachDocInput = document.getElementById('attach-doc');
 const attachStatus = document.getElementById('attach-status');
+let pendingAttachment = null;
 
 const registerForm = document.getElementById('register-form');
-const verifyForm = document.getElementById('verify-form');
 const loginForm = document.getElementById('login-form');
 const refreshForm = document.getElementById('refresh-form');
 
 const registerNickname = document.getElementById('register-nickname');
-const verifyNickname = document.getElementById('verify-nickname');
-const verifyCode = document.getElementById('verify-code');
 const loginNickname = document.getElementById('login-nickname');
-const loginCode = document.getElementById('login-code');
 const loginOneTime = document.getElementById('login-one-time');
 
 const registerStatus = document.getElementById('register-status');
-const verifyStatus = document.getElementById('verify-status');
+const registerQrBlock = document.getElementById('register-qr-block');
+const registerQrImage = document.getElementById('register-qr-image');
+const registerQrSecret = document.getElementById('register-qr-secret');
 const loginStatus = document.getElementById('login-status');
 const loginOutput = document.getElementById('login-output');
 const refreshStatus = document.getElementById('refresh-status');
 const refreshOutput = document.getElementById('refresh-output');
-
-const qrBlock = document.getElementById('register-qr');
-const qrImage = document.getElementById('qr-image');
-const otpauthUrl = document.getElementById('otpauth-url');
+const authLoginTab = document.getElementById('auth-login-tab');
+const authRegisterTab = document.getElementById('auth-register-tab');
+const authLoginView = document.getElementById('auth-login-view');
+const authRegisterView = document.getElementById('auth-register-view');
+const authShowRegister = document.getElementById('auth-show-register');
+const authShowLogin = document.getElementById('auth-show-login');
 
 const pairingStartBtn = document.getElementById('pairing-start-btn');
 const pairingAcceptBtn = document.getElementById('pairing-accept-btn');
@@ -74,6 +82,12 @@ const settingsStatus = document.getElementById('settings-status');
 const loginCodeBtn = document.getElementById('login-code-btn');
 const loginCodeValue = document.getElementById('login-code-value');
 const loginCodeStatus = document.getElementById('login-code-status');
+const profileDisplayName = document.getElementById('profile-display-name');
+const profileAvatarBtn = document.getElementById('profile-avatar-btn');
+const profileAvatarInput = document.getElementById('profile-avatar-input');
+const profileAvatarPreview = document.getElementById('profile-avatar-preview');
+const profileSaveBtn = document.getElementById('profile-save-btn');
+const profileStatus = document.getElementById('profile-status');
 
 const state = {
   accessToken: '',
@@ -83,11 +97,15 @@ const state = {
   epoch: 1,
   chats: [],
   currentChatId: null,
-  searchTerm: ''
+  searchTerm: '',
+  profile: {
+    displayName: '',
+    avatarUrl: ''
+  }
 };
 
 const DB_NAME = 'vladogram';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
 const textEncoder = new TextEncoder();
 
@@ -108,6 +126,9 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('appState')) {
         db.createObjectStore('appState', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('contactAliases')) {
+        db.createObjectStore('contactAliases', { keyPath: 'nickname' });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -138,6 +159,17 @@ async function dbPut(storeName, value) {
   });
 }
 
+async function dbDelete(storeName, key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    const request = store.delete(key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
 async function dbGetAll(storeName) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
@@ -145,6 +177,17 @@ async function dbGetAll(storeName) {
     const store = tx.objectStore(storeName);
     const request = store.getAll();
     request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function dbClear(storeName) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    const request = store.clear();
+    request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
 }
@@ -170,6 +213,7 @@ async function setCsrfToken(token) {
 const messagesByChat = new Map();
 const typingUsers = new Map();
 const lastSeenByChat = new Map();
+const aliasByNickname = new Map();
 let socket = null;
 let typingTimer = null;
 let isTyping = false;
@@ -210,6 +254,37 @@ function setAuthVisible(show) {
   }
 }
 
+function setAuthView(mode) {
+  const isLogin = mode === 'login';
+  authLoginTab?.classList.toggle('is-active', isLogin);
+  authRegisterTab?.classList.toggle('is-active', !isLogin);
+  authLoginView?.classList.toggle('is-active', isLogin);
+  authRegisterView?.classList.toggle('is-active', !isLogin);
+}
+
+function resetRegisterQr() {
+  if (registerQrImage) {
+    registerQrImage.removeAttribute('src');
+  }
+  if (registerQrSecret) {
+    registerQrSecret.textContent = '';
+  }
+  registerQrBlock?.classList.add('is-hidden');
+}
+
+function showRegisterQr(qrDataUrl, secret) {
+  if (!qrDataUrl && !secret) {
+    return;
+  }
+  if (registerQrImage && qrDataUrl) {
+    registerQrImage.src = qrDataUrl;
+  }
+  if (registerQrSecret && secret) {
+    registerQrSecret.textContent = secret;
+  }
+  registerQrBlock?.classList.remove('is-hidden');
+}
+
 function openModal(modal) {
   if (modal) {
     modal.classList.add('is-open');
@@ -222,12 +297,25 @@ function closeModal(modal) {
   }
 }
 
+function hasSubtleCrypto() {
+  return Boolean(window.crypto?.subtle);
+}
+
 function cryptoAvailable() {
-  return Boolean(window.isSecureContext && window.crypto?.subtle);
+  return hasSubtleCrypto() || INSECURE_LOCAL;
+}
+
+function usingInsecureCrypto() {
+  return INSECURE_LOCAL && !hasSubtleCrypto();
 }
 
 function ensureCryptoAvailable(target) {
-  if (cryptoAvailable()) return true;
+  if (cryptoAvailable()) {
+    if (usingInsecureCrypto() && target) {
+      setStatus(target, 'Локальный режим: шифрование отключено.');
+    }
+    return true;
+  }
   const message = 'Для Web Crypto нужен безопасный контекст (HTTPS или localhost).';
   if (target) {
     showError(target, message);
@@ -351,6 +439,19 @@ async function ensureDeviceIdentity() {
   const existing = await dbGet('deviceIdentity', 'primary');
   if (existing?.publicJwk && existing?.privateJwk) {
     return existing;
+  }
+
+  if (!hasSubtleCrypto() && INSECURE_LOCAL) {
+    const record = {
+      id: 'primary',
+      publicJwk: { insecure: true },
+      privateJwk: null,
+      deviceId: null,
+      userId: null,
+      insecure: true
+    };
+    await dbPut('deviceIdentity', record);
+    return record;
   }
 
   const keyPair = await crypto.subtle.generateKey(
@@ -548,6 +649,23 @@ async function ensureChatKey(chatId, peerNickname) {
     return existing;
   }
 
+  if (!hasSubtleCrypto() && INSECURE_LOCAL) {
+    const record = existing || {
+      chatId: String(chatId),
+      keyJwk: null,
+      counter: 0,
+      epoch: state.epoch,
+      peerNickname: peerNickname || null,
+      insecure: true
+    };
+    if (peerNickname && !record.peerNickname) {
+      record.peerNickname = peerNickname;
+    }
+    record.insecure = true;
+    await saveChatKeyRecord(record);
+    return record;
+  }
+
   if (!peerNickname) {
     return null;
   }
@@ -588,6 +706,32 @@ async function encryptForChat(chatId, plaintext) {
   if (!cryptoAvailable()) {
     return null;
   }
+  if (!hasSubtleCrypto() && INSECURE_LOCAL) {
+    const record =
+      (await getChatKeyRecord(chatId)) || {
+        chatId: String(chatId),
+        keyJwk: null,
+        counter: 0,
+        epoch: state.epoch,
+        peerNickname: null,
+        insecure: true
+      };
+    const nextCounter = Number(record.counter || 0) + 1;
+    record.counter = nextCounter;
+    record.epoch = record.epoch || state.epoch;
+    record.insecure = true;
+    await saveChatKeyRecord(record);
+    return {
+      ciphertext: plaintext,
+      nonce: randomBase64(12),
+      meta: {
+        senderDeviceId: state.deviceId,
+        epoch: record.epoch || state.epoch,
+        counter: nextCounter,
+        insecure: true
+      }
+    };
+  }
   const record = await getChatKeyRecord(chatId);
   if (!record?.keyJwk) {
     return null;
@@ -621,6 +765,9 @@ async function encryptForChat(chatId, plaintext) {
 async function decryptForChat(chatId, ciphertext, nonce) {
   if (!cryptoAvailable()) {
     return null;
+  }
+  if (!hasSubtleCrypto() && INSECURE_LOCAL) {
+    return ciphertext;
   }
   const record = await getChatKeyRecord(chatId);
   if (!record?.keyJwk || !ciphertext || !nonce) {
@@ -687,12 +834,14 @@ function clearAuth() {
   state.user = null;
   state.deviceId = null;
   state.csrfToken = '';
+  state.profile = { displayName: '', avatarUrl: '' };
   setAppValue('csrfToken', '').catch(() => {});
   updateUserUI();
   if (loginCodeValue) {
     loginCodeValue.textContent = '';
   }
   setStatus(loginCodeStatus, '');
+  setAuthView('login');
   setAuthVisible(true);
   state.currentChatId = null;
   setChatActive(false);
@@ -706,18 +855,44 @@ function clearAuth() {
 }
 
 function updateUserUI() {
-  const label = state.user?.nickname || 'Гость';
+  const label = state.profile.displayName || state.user?.nickname || 'Гость';
   if (menuNickname) {
     menuNickname.textContent = label;
   }
   if (menuAvatar) {
-    menuAvatar.textContent = label ? label.charAt(0).toUpperCase() : '?';
+    const avatarUrl = state.profile.avatarUrl;
+    if (avatarUrl) {
+      menuAvatar.style.backgroundImage = `url(${avatarUrl})`;
+      menuAvatar.style.backgroundSize = 'cover';
+      menuAvatar.style.backgroundPosition = 'center';
+      menuAvatar.textContent = '';
+    } else {
+      menuAvatar.style.backgroundImage = '';
+      menuAvatar.textContent = label ? label.charAt(0).toUpperCase() : '?';
+    }
+  }
+  if (profileDisplayName) {
+    profileDisplayName.value = state.profile.displayName || '';
+  }
+  if (profileAvatarPreview) {
+    if (state.profile.avatarUrl) {
+      profileAvatarPreview.style.backgroundImage = `url(${state.profile.avatarUrl})`;
+      profileAvatarPreview.style.backgroundSize = 'cover';
+      profileAvatarPreview.style.backgroundPosition = 'center';
+      profileAvatarPreview.textContent = '';
+    } else {
+      profileAvatarPreview.style.backgroundImage = '';
+      profileAvatarPreview.textContent = label ? label.charAt(0).toUpperCase() : '?';
+    }
   }
 }
 
 function getChatDisplayName(chat) {
   if (!chat) return 'Чат';
-  return chat.peerNickname || 'Чат';
+  const alias = chat.peerNickname
+    ? aliasByNickname.get(chat.peerNickname.toLowerCase())
+    : '';
+  return alias || chat.peerDisplayName || chat.peerNickname || 'Чат';
 }
 
 function ensureChat(chatId, peerNickname = null) {
@@ -734,6 +909,8 @@ function ensureChat(chatId, peerNickname = null) {
     id,
     title: peerNickname || 'Чат',
     peerNickname: peerNickname || null,
+    peerDisplayName: null,
+    peerAvatarUrl: null,
     peerDeviceId: null,
     lastMessageAt: null,
     lastMessageText: ''
@@ -747,6 +924,9 @@ function updateChatHeader(chatId) {
   const title = chat ? getChatDisplayName(chat) : 'Чат не выбран';
   if (chatTitle) {
     chatTitle.textContent = title;
+  }
+  if (aliasBtn) {
+    aliasBtn.disabled = !chat?.peerNickname;
   }
   if (chatPeer) {
     const lastSeen = lastSeenByChat.get(String(chatId));
@@ -771,6 +951,9 @@ function setChatActive(active) {
     updateAttachmentStatus(null);
     attachMenu?.classList.add('is-hidden');
   }
+  if (appShell) {
+    appShell.classList.toggle('is-chat-open', active);
+  }
 }
 
 function updateAttachmentStatus(file) {
@@ -779,7 +962,53 @@ function updateAttachmentStatus(file) {
     setStatus(attachStatus, '');
     return;
   }
-  setStatus(attachStatus, `Файл готов: ${file.name}`);
+  const label = file.name || file.label || 'файл';
+  let typeLabel = 'Файл';
+  if (file.type === 'image') {
+    typeLabel = 'Изображение';
+  } else if (file.type === 'doc') {
+    typeLabel = 'Документ';
+  }
+  setStatus(attachStatus, `${typeLabel} готово: ${label}`);
+}
+
+function clearAttachment() {
+  pendingAttachment = null;
+  updateAttachmentStatus(null);
+  if (attachImageInput) attachImageInput.value = '';
+  if (attachDocInput) attachDocInput.value = '';
+  attachMenu?.classList.add('is-hidden');
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('read_failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadImageDataUrl(dataUrl) {
+  const { ok, data } = await postJson('/uploads/image', { data_url: dataUrl });
+  if (!ok || !data?.url) {
+    throw new Error(data?.error || 'upload_failed');
+  }
+  return data.url;
+}
+
+function formatUploadError(error) {
+  const message = String(error || '');
+  switch (message) {
+    case 'payload_too_large':
+      return 'Файл слишком большой.';
+    case 'invalid_image':
+      return 'Неверный формат изображения.';
+    case 'upload_failed':
+      return 'Не удалось сохранить изображение.';
+    default:
+      return 'Не удалось загрузить изображение.';
+  }
 }
 
 function renderChatList() {
@@ -818,7 +1047,16 @@ function renderChatList() {
     const avatar = document.createElement('div');
     avatar.className = 'chat-avatar';
     const label = getChatDisplayName(chat);
-    avatar.textContent = label ? label.charAt(0).toUpperCase() : '#';
+    const avatarUrl = chat.peerAvatarUrl || null;
+    if (avatarUrl) {
+      avatar.style.backgroundImage = `url(${avatarUrl})`;
+      avatar.style.backgroundSize = 'cover';
+      avatar.style.backgroundPosition = 'center';
+      avatar.textContent = '';
+    } else {
+      avatar.style.backgroundImage = '';
+      avatar.textContent = label ? label.charAt(0).toUpperCase() : '#';
+    }
 
     const info = document.createElement('div');
     info.className = 'chat-info';
@@ -837,11 +1075,25 @@ function renderChatList() {
 
     info.append(name, preview, meta);
 
+    const right = document.createElement('div');
+    right.className = 'chat-right';
+
     const time = document.createElement('div');
     time.className = 'chat-meta';
     time.textContent = chat.lastMessageAt ? formatTime(chat.lastMessageAt) : '';
 
-    item.append(avatar, info, time);
+    const badge = document.createElement('div');
+    badge.className = 'chat-badge';
+    const unread = Number(chat.unreadCount || 0);
+    if (unread > 0) {
+      badge.textContent = String(unread);
+      badge.classList.remove('is-hidden');
+    } else {
+      badge.classList.add('is-hidden');
+    }
+
+    right.append(time, badge);
+    item.append(avatar, info, right);
     item.addEventListener('click', () => {
       navigateToChat(chat);
     });
@@ -859,6 +1111,30 @@ async function loadChatsFromStorage() {
   renderChatList();
 }
 
+async function loadAliasesFromStorage() {
+  const records = await dbGetAll('contactAliases');
+  aliasByNickname.clear();
+  records.forEach((record) => {
+    if (record?.nickname && record?.alias) {
+      aliasByNickname.set(record.nickname.toLowerCase(), record.alias);
+    }
+  });
+}
+
+async function setAliasForNickname(nickname, alias) {
+  const key = String(nickname || '').trim();
+  if (!key) return;
+  const normalized = key.toLowerCase();
+  const trimmed = String(alias || '').trim();
+  if (!trimmed) {
+    aliasByNickname.delete(normalized);
+    await dbDelete('contactAliases', normalized);
+    return;
+  }
+  aliasByNickname.set(normalized, trimmed);
+  await dbPut('contactAliases', { nickname: normalized, alias: trimmed });
+}
+
 async function loadChatsFromServer() {
   if (!state.accessToken) return;
   const { ok, data } = await getJson('/chats');
@@ -867,6 +1143,12 @@ async function loadChatsFromServer() {
   }
   data.chats.forEach((row) => {
     const chat = ensureChat(row.chat_id, row.peer_nickname || null);
+    if (row.peer_display_name) {
+      chat.peerDisplayName = row.peer_display_name;
+    }
+    if (row.peer_avatar_url) {
+      chat.peerAvatarUrl = row.peer_avatar_url;
+    }
     if (row.last_message_at) {
       const currentTime = chat.lastMessageAt ? Date.parse(chat.lastMessageAt) : 0;
       const incomingTime = Date.parse(row.last_message_at);
@@ -935,6 +1217,12 @@ async function openDirectChat(peerNickname, { navigate = false } = {}) {
     return null;
   }
   const chat = ensureChat(data.chat_id, data.peer_nickname || nickname);
+  if (data.peer_display_name) {
+    chat.peerDisplayName = data.peer_display_name;
+  }
+  if (data.peer_avatar_url) {
+    chat.peerAvatarUrl = data.peer_avatar_url;
+  }
   if (data.last_message_at) {
     chat.lastMessageAt = data.last_message_at;
   }
@@ -985,6 +1273,20 @@ function renderMessages(chatId) {
   scrollMessagesToBottom();
 }
 
+function resolveMessageContent(message) {
+  return message?.decrypted || message?.ciphertext || '';
+}
+
+function getMessagePreview(message) {
+  if (message?.meta?.kind === 'image') {
+    return '📷 Изображение';
+  }
+  if (message?.meta?.kind === 'doc') {
+    return message?.meta?.name ? `📎 ${message.meta.name}` : '📎 Документ';
+  }
+  return resolveMessageContent(message);
+}
+
 function addMessageToUI(message, { system } = {}) {
   if (!messagesEl) return;
   const item = document.createElement('div');
@@ -1007,10 +1309,33 @@ function addMessageToUI(message, { system } = {}) {
       state.user && String(message.sender_user_id) === String(state.user.sub);
     item.className = `message ${isOwn ? 'outgoing' : 'incoming'}`;
     const time = formatTime(message.sent_at || new Date());
-    const sender = isOwn ? 'Вы' : message.sender_nickname || 'Пользователь';
+    const sender = isOwn
+      ? 'Вы'
+      : message.sender_display_name ||
+        message.sender_nickname ||
+        'Пользователь';
     const mode = message.decrypted ? 'расшифровано' : 'шифр';
     meta.textContent = `${sender} | ${time} | ${mode}`;
-    body.textContent = message.decrypted || message.ciphertext || '';
+    const kind = message.meta?.kind;
+    const content = resolveMessageContent(message);
+    if (kind === 'image') {
+      if (typeof content === 'string' && (content.startsWith('data:image/') || content.includes('/uploads/'))) {
+        const img = document.createElement('img');
+        img.src = content;
+        img.alt = message.meta?.name || 'Изображение';
+        img.loading = 'lazy';
+        img.style.maxWidth = '260px';
+        img.style.borderRadius = '14px';
+        img.style.display = 'block';
+        body.appendChild(img);
+      } else {
+        body.textContent = '🔒 Изображение';
+      }
+    } else if (kind === 'doc') {
+      body.textContent = content || (message.meta?.name ? `Документ: ${message.meta.name}` : 'Документ');
+    } else {
+      body.textContent = content;
+    }
   }
 
   bubble.appendChild(body);
@@ -1073,6 +1398,7 @@ async function joinChat(chatId, { silent } = {}) {
   typingUsers.clear();
   updateTypingStatus();
   renderMessages(id);
+  clearAttachment();
   await postJson(`/chats/${id}/join`, {});
   await loadChatHistory(id);
   if (socket?.connected) {
@@ -1113,7 +1439,7 @@ async function loadChatHistory(chatId) {
     const isOwn =
       state.user && String(last.sender_user_id) === String(state.user.sub);
     chat.lastMessageAt = last.sent_at || new Date().toISOString();
-    const previewText = last.decrypted || last.ciphertext || '';
+    const previewText = getMessagePreview(last);
     chat.lastMessageText = isOwn ? `Вы: ${previewText}` : previewText;
     if (
       last.sender_nickname &&
@@ -1123,6 +1449,12 @@ async function loadChatHistory(chatId) {
     ) {
       chat.peerNickname = last.sender_nickname;
       chat.title = last.sender_nickname;
+    }
+    if (last.sender_display_name && !isOwn) {
+      chat.peerDisplayName = last.sender_display_name;
+    }
+    if (last.sender_avatar_url && !isOwn) {
+      chat.peerAvatarUrl = last.sender_avatar_url;
     }
     if (state.user && !isOwn) {
       lastSeenByChat.set(String(chatId), last.sent_at || new Date().toISOString());
@@ -1150,17 +1482,35 @@ async function handleIncomingMessage(payload) {
     chat.peerNickname = payload.sender_nickname;
     chat.title = payload.sender_nickname;
   }
+  if (
+    payload.sender_display_name &&
+    state.user &&
+    String(payload.sender_user_id) !== String(state.user.sub)
+  ) {
+    chat.peerDisplayName = payload.sender_display_name;
+  }
+  if (
+    payload.sender_avatar_url &&
+    state.user &&
+    String(payload.sender_user_id) !== String(state.user.sub)
+  ) {
+    chat.peerAvatarUrl = payload.sender_avatar_url;
+  }
   if (!messagesByChat.has(chatId)) {
     messagesByChat.set(chatId, []);
   }
 
   const decrypted = await decryptForChat(chatId, payload.ciphertext, payload.nonce);
+  const existingList = messagesByChat.get(chatId);
+  if (payload.id && existingList.some((item) => item.id === payload.id)) {
+    return;
+  }
   const stored = { ...payload, decrypted };
-  messagesByChat.get(chatId).push(stored);
+  existingList.push(stored);
   const isOwn =
     state.user && String(payload.sender_user_id) === String(state.user.sub);
   chat.lastMessageAt = payload.sent_at || new Date().toISOString();
-  const previewText = decrypted || payload.ciphertext || '';
+  const previewText = getMessagePreview(stored);
   chat.lastMessageText = isOwn ? `Вы: ${previewText}` : previewText;
   if (!isOwn) {
     lastSeenByChat.set(chatId, payload.sent_at || new Date().toISOString());
@@ -1287,6 +1637,15 @@ async function syncEpochFromServer() {
   state.epoch = Number(data.epoch) || state.epoch;
 }
 
+async function syncProfileFromServer() {
+  if (!state.accessToken) return;
+  const { ok, data } = await getJson('/me');
+  if (!ok || !data) return;
+  state.profile.displayName = data.display_name || '';
+  state.profile.avatarUrl = data.avatar_url || '';
+  updateUserUI();
+}
+
 async function clearIndexedDb() {
   dbPromise = null;
   return new Promise((resolve, reject) => {
@@ -1295,6 +1654,33 @@ async function clearIndexedDb() {
     request.onerror = () => reject(request.error);
     request.onblocked = () => resolve();
   });
+}
+
+function clearChatState() {
+  messagesByChat.clear();
+  typingUsers.clear();
+  lastSeenByChat.clear();
+  state.chats = [];
+  state.currentChatId = null;
+  state.searchTerm = '';
+  if (chatSearchInput) {
+    chatSearchInput.value = '';
+  }
+  clearMessages();
+  clearAttachment();
+  setChatActive(false);
+  updateChatHeader(null);
+  updateTypingStatus();
+  renderChatList();
+}
+
+async function clearUserDataForAccountSwitch() {
+  stopPairingPoll();
+  await dbClear('chatKeys');
+  await dbClear('trustedContacts');
+  await dbClear('contactAliases');
+  aliasByNickname.clear();
+  clearChatState();
 }
 
 async function ensureDeviceRegistered() {
@@ -1373,9 +1759,19 @@ async function fetchPeerDeviceKey(nickname) {
 
 async function handleAuth(token) {
   if (!token) return;
+  const nextUser = parseJwt(token);
+  const nextUserId = nextUser?.sub ? String(nextUser.sub) : null;
+  const previousUserId = await getAppValue('activeUserId', null);
+  if (nextUserId && previousUserId && String(previousUserId) !== nextUserId) {
+    await clearUserDataForAccountSwitch();
+  }
   setAccessToken(token);
+  if (nextUserId) {
+    await setAppValue('activeUserId', nextUserId);
+  }
   setAuthVisible(false);
   await syncEpochFromServer();
+  await syncProfileFromServer();
   await ensureDeviceRegistered();
   await loadChatsFromServer();
   connectSocket();
@@ -1398,6 +1794,10 @@ async function startPairingAsNewDevice() {
     return;
   }
   if (!ensureCryptoAvailable(settingsStatus)) {
+    return;
+  }
+  if (!hasSubtleCrypto() && INSECURE_LOCAL) {
+    showError(settingsStatus, 'Pairing недоступен в локальном режиме без шифрования.');
     return;
   }
   await ensureDeviceRegistered();
@@ -1520,6 +1920,10 @@ async function acceptPairingAsOldDevice() {
   if (!ensureCryptoAvailable(settingsStatus)) {
     return;
   }
+  if (!hasSubtleCrypto() && INSECURE_LOCAL) {
+    showError(pairingTransferStatus, 'Pairing недоступен в локальном режиме без шифрования.');
+    return;
+  }
   const raw = pairingInput?.value.trim();
   if (!raw) {
     showError(pairingTransferStatus, 'Вставьте данные подключения.');
@@ -1618,14 +2022,18 @@ async function createLoginCodeForAuth() {
   }
 
   const code = generateLoginCode();
-  const payload = await exportKeyMaterial();
-  const encrypted = await encryptLoginPayload(code, payload);
-  const { ok, data } = await postJson('/auth/login-code', {
-    code,
-    payload_ciphertext: encrypted.ciphertext,
-    payload_nonce: encrypted.nonce,
-    payload_meta: encrypted.meta
-  });
+  let requestPayload = { code };
+  if (hasSubtleCrypto()) {
+    const payload = await exportKeyMaterial();
+    const encrypted = await encryptLoginPayload(code, payload);
+    requestPayload = {
+      code,
+      payload_ciphertext: encrypted.ciphertext,
+      payload_nonce: encrypted.nonce,
+      payload_meta: encrypted.meta
+    };
+  }
+  const { ok, data } = await postJson('/auth/login-code', requestPayload);
   if (!ok) {
     showError(loginCodeStatus, `Не удалось создать код: ${data.error || 'неизвестно'}`);
     return;
@@ -1645,11 +2053,8 @@ registerForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const nickname = registerNickname.value.trim();
   setStatus(registerStatus, '');
-  setStatus(verifyStatus, '');
   loginOutput.textContent = '';
-  qrBlock.classList.add('is-hidden');
-  qrImage.removeAttribute('src');
-  otpauthUrl.textContent = '';
+  resetRegisterQr();
 
   if (!nickname) {
     showError(registerStatus, 'Введите ник.');
@@ -1662,61 +2067,34 @@ registerForm?.addEventListener('submit', async (event) => {
     return;
   }
 
-  qrImage.src = data.qr_data_url;
-  otpauthUrl.textContent = data.otpauth_url;
-  qrBlock.classList.remove('is-hidden');
-
-  verifyNickname.value = nickname;
   loginNickname.value = nickname;
 
-  showSuccess(registerStatus, 'QR готов. Отсканируйте в Authenticator и подтвердите.');
-});
-
-verifyForm?.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const nickname = verifyNickname.value.trim();
-  const code = normalizeCode(verifyCode.value);
-  setStatus(verifyStatus, '');
-
-  if (!nickname || !code) {
-    showError(verifyStatus, 'Введите ник и код.');
-    return;
+  if (data.csrf_token) {
+    await setCsrfToken(data.csrf_token);
   }
 
-  const { ok, data } = await postJson('/auth/register/verify', { nickname, code });
-  if (!ok) {
-    showError(verifyStatus, `Подтверждение не удалось: ${data.error || 'неизвестно'}`);
-    return;
-  }
-
-  showSuccess(verifyStatus, 'TOTP включен. Теперь можно войти.');
+  showRegisterQr(data.totp_qr_data_url, data.totp_secret);
+  showSuccess(registerStatus, 'Аккаунт создан. Сканируйте QR и войдите по коду.');
+  setAuthView('register');
 });
 
 loginForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const nickname = loginNickname.value.trim();
-  const code = normalizeCode(loginCode.value);
   const oneTimeCode = normalizeCode(loginOneTime.value);
   setStatus(loginStatus, '');
   loginOutput.textContent = '';
 
-  if (!nickname || !code) {
-    showError(loginStatus, 'Введите ник и код.');
+  if (!nickname || !oneTimeCode) {
+    showError(loginStatus, 'Введите ник и одноразовый код.');
     return;
   }
 
-  const payload = { nickname, code };
-  if (oneTimeCode) {
-    payload.login_code = oneTimeCode;
-  }
+  const payload = { nickname, login_code: oneTimeCode };
 
   const { ok, data } = await postJson('/auth/login', payload);
   if (!ok) {
-    const message =
-      data.error === 'login_code_required'
-        ? 'Нужен одноразовый код для входа.'
-        : `Вход не удался: ${data.error || 'неизвестно'}`;
-    showError(loginStatus, message);
+    showError(loginStatus, `Вход не удался: ${data.error || 'неизвестно'}`);
     return;
   }
 
@@ -1728,8 +2106,8 @@ loginForm?.addEventListener('submit', async (event) => {
   loginOutput.textContent = JSON.stringify(data, null, 2);
 
   if (data.login_payload && oneTimeCode) {
-    if (!ensureCryptoAvailable(loginStatus)) {
-      showError(loginStatus, 'Нужен HTTPS, чтобы расшифровать ключи.');
+    if (!hasSubtleCrypto()) {
+      showError(loginStatus, 'Шифрование недоступно в локальном режиме.');
     } else {
       const decrypted = await decryptLoginPayload(oneTimeCode, data.login_payload);
       if (decrypted) {
@@ -1787,6 +2165,11 @@ refreshForm?.addEventListener('submit', async (event) => {
   await refreshSession();
 });
 
+authLoginTab?.addEventListener('click', () => setAuthView('login'));
+authRegisterTab?.addEventListener('click', () => setAuthView('register'));
+authShowRegister?.addEventListener('click', () => setAuthView('register'));
+authShowLogin?.addEventListener('click', () => setAuthView('login'));
+
 menuBtn?.addEventListener('click', () => {
   openModal(menuModal);
 });
@@ -1809,6 +2192,18 @@ chatSearchInput?.addEventListener('input', () => {
   renderChatList();
 });
 
+aliasBtn?.addEventListener('click', async () => {
+  if (!state.currentChatId) return;
+  const chat = state.chats.find((item) => item.id === state.currentChatId);
+  if (!chat?.peerNickname) return;
+  const currentAlias = aliasByNickname.get(chat.peerNickname.toLowerCase()) || '';
+  const nextAlias = window.prompt('Задайте имя для контакта:', currentAlias);
+  if (nextAlias === null) return;
+  await setAliasForNickname(chat.peerNickname, nextAlias);
+  renderChatList();
+  updateChatHeader(state.currentChatId);
+});
+
 attachBtn?.addEventListener('click', (event) => {
   event.stopPropagation();
   if (!attachMenu) return;
@@ -1826,14 +2221,73 @@ attachMenu?.addEventListener('click', (event) => {
   attachMenu.classList.add('is-hidden');
 });
 
-attachImageInput?.addEventListener('change', () => {
+profileAvatarBtn?.addEventListener('click', () => {
+  profileAvatarInput?.click();
+});
+
+profileAvatarInput?.addEventListener('change', async () => {
+  const file = profileAvatarInput.files?.[0] || null;
+  if (!file) return;
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    const imageUrl = await uploadImageDataUrl(dataUrl);
+    state.profile.avatarUrl = imageUrl;
+    updateUserUI();
+    showSuccess(profileStatus, 'Аватар загружен. Не забудьте сохранить.');
+  } catch (err) {
+    showError(profileStatus, formatUploadError(err?.message));
+  }
+});
+
+profileSaveBtn?.addEventListener('click', async () => {
+  if (!state.accessToken) {
+    showError(profileStatus, 'Нужен вход.');
+    return;
+  }
+  const displayName = profileDisplayName?.value.trim() || '';
+  const payload = {
+    display_name: displayName,
+    avatar_url: state.profile.avatarUrl || ''
+  };
+  const { ok, data } = await postJson('/me/profile', payload);
+  if (!ok) {
+    showError(profileStatus, `Не удалось сохранить: ${data.error || 'неизвестно'}`);
+    return;
+  }
+  state.profile.displayName = data.display_name || displayName;
+  state.profile.avatarUrl = data.avatar_url || state.profile.avatarUrl;
+  updateUserUI();
+  showSuccess(profileStatus, 'Профиль сохранен.');
+});
+
+attachImageInput?.addEventListener('change', async () => {
   const file = attachImageInput.files?.[0] || null;
-  updateAttachmentStatus(file);
+  if (!file) {
+    clearAttachment();
+    return;
+  }
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    pendingAttachment = {
+      type: 'image',
+      dataUrl,
+      name: file.name || 'image'
+    };
+    updateAttachmentStatus({ name: pendingAttachment.name, type: 'image' });
+  } catch {
+    pendingAttachment = null;
+    showError(attachStatus, 'Не удалось прочитать изображение.');
+  }
 });
 
 attachDocInput?.addEventListener('change', () => {
   const file = attachDocInput.files?.[0] || null;
-  updateAttachmentStatus(file);
+  if (!file) {
+    clearAttachment();
+    return;
+  }
+  pendingAttachment = { type: 'doc', name: file.name || 'document' };
+  updateAttachmentStatus({ name: pendingAttachment.name, type: 'doc' });
 });
 
 document.addEventListener('click', (event) => {
@@ -1889,7 +2343,7 @@ messageForm?.addEventListener('submit', async (event) => {
   }
 
   const text = messageInput.value.trim();
-  if (!text) {
+  if (!text && !pendingAttachment) {
     return;
   }
 
@@ -1908,30 +2362,53 @@ messageForm?.addEventListener('submit', async (event) => {
     await ensureChatKey(state.currentChatId, chat.peerNickname);
   }
 
-  const encrypted = await encryptForChat(state.currentChatId, text);
-  if (!encrypted) {
-    updateSocketStatus(
-      'Нет ключа чата. Проверьте ник собеседника и импорт ключей.',
-      'error'
-    );
-    return;
-  }
-
-  const payload = {
-    chatId: state.currentChatId,
-    ...encrypted
+  const sendEncryptedMessage = async (content, metaExtra = {}) => {
+    const encrypted = await encryptForChat(state.currentChatId, content);
+    if (!encrypted) {
+      updateSocketStatus(
+        'Нет ключа чата. Проверьте ник собеседника и импорт ключей.',
+        'error'
+      );
+      return false;
+    }
+    encrypted.meta = { ...(encrypted.meta || {}), ...metaExtra };
+    const payload = {
+      chatId: state.currentChatId,
+      ...encrypted
+    };
+    socket.emit('message:send', payload, (ack) => {
+      if (ack && !ack.ok) {
+        updateSocketStatus(`Отправка не удалась: ${ack.error || 'неизвестно'}`, 'error');
+      }
+    });
+    return true;
   };
 
-  socket.emit('message:send', payload, (ack) => {
-    if (ack && !ack.ok) {
-      updateSocketStatus(`Отправка не удалась: ${ack.error || 'неизвестно'}`, 'error');
+  if (text) {
+    await sendEncryptedMessage(text, { kind: 'text' });
+  }
+
+  if (pendingAttachment?.type === 'image' && pendingAttachment.dataUrl) {
+    try {
+      const imageUrl = await uploadImageDataUrl(pendingAttachment.dataUrl);
+      await sendEncryptedMessage(imageUrl, {
+        kind: 'image',
+        name: pendingAttachment.name || null,
+        storage: 'server'
+      });
+    } catch (err) {
+      updateSocketStatus(formatUploadError(err?.message), 'error');
     }
-  });
+  } else if (pendingAttachment?.type === 'doc') {
+    const label = pendingAttachment.name ? `Документ: ${pendingAttachment.name}` : 'Документ';
+    await sendEncryptedMessage(label, {
+      kind: 'doc',
+      name: pendingAttachment.name || null
+    });
+  }
 
   messageInput.value = '';
-  if (attachImageInput) attachImageInput.value = '';
-  if (attachDocInput) attachDocInput.value = '';
-  updateAttachmentStatus(null);
+  clearAttachment();
   emitTypingStop();
 });
 
@@ -2053,8 +2530,12 @@ async function initApp() {
       cryptoWarning,
       'Для Web Crypto нужен безопасный контекст (HTTPS или localhost).'
     );
+  } else if (usingInsecureCrypto() && cryptoWarning) {
+    setStatus(cryptoWarning, 'Локальный режим: шифрование отключено.');
   }
+  setAuthView('login');
   state.csrfToken = await getAppValue('csrfToken', '');
+  await loadAliasesFromStorage();
   await ensureDeviceIdentity();
   await getDeviceId();
   await loadChatsFromStorage();

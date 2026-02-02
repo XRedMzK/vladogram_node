@@ -73,7 +73,7 @@ function initDb() {
 function ensureTestUser(db) {
   const nickname = 'test';
   const existing = db
-    .prepare('SELECT id, nickname, created_at FROM users WHERE nickname = ?')
+    .prepare('SELECT id, nickname, display_name, avatar_url, created_at FROM users WHERE nickname = ?')
     .get(nickname);
 
   if (existing) {
@@ -81,11 +81,11 @@ function ensureTestUser(db) {
   }
 
   const info = db
-    .prepare('INSERT INTO users (nickname) VALUES (?)')
-    .run(nickname);
+    .prepare('INSERT INTO users (nickname, display_name) VALUES (?, ?)')
+    .run(nickname, nickname);
 
   return db
-    .prepare('SELECT id, nickname, created_at FROM users WHERE id = ?')
+    .prepare('SELECT id, nickname, display_name, avatar_url, created_at FROM users WHERE id = ?')
     .get(info.lastInsertRowid);
 }
 
@@ -130,21 +130,53 @@ function ensureDirectChat(db, userId, peerId, epoch = 1) {
 
 function getUserByNickname(db, nickname) {
   return db
-    .prepare('SELECT id, nickname, created_at FROM users WHERE nickname = ?')
+    .prepare(
+      'SELECT id, nickname, display_name, avatar_url, created_at FROM users WHERE nickname = ?'
+    )
     .get(nickname);
 }
 
+function getUserById(db, userId) {
+  return db
+    .prepare(
+      'SELECT id, nickname, display_name, avatar_url, created_at FROM users WHERE id = ?'
+    )
+    .get(userId);
+}
+
+function updateUserProfile(db, userId, { displayName, avatarUrl }) {
+  const existing = getUserById(db, userId);
+  if (!existing) {
+    return null;
+  }
+  const nextDisplay = displayName !== undefined ? displayName : existing.display_name;
+  const nextAvatar = avatarUrl !== undefined ? avatarUrl : existing.avatar_url;
+  db.prepare(
+    'UPDATE users SET display_name = ?, avatar_url = ? WHERE id = ?'
+  ).run(nextDisplay, nextAvatar, userId);
+  return getUserById(db, userId);
+}
+
+function createUser(db, nickname) {
+  const info = db
+    .prepare('INSERT INTO users (nickname, display_name) VALUES (?, ?)')
+    .run(nickname, nickname);
+  return db
+    .prepare('SELECT id, nickname, display_name, avatar_url, created_at FROM users WHERE id = ?')
+    .get(info.lastInsertRowid);
+}
+
 function createUserWithTotp(db, nickname, secret) {
-  const insertUser = db.prepare('INSERT INTO users (nickname) VALUES (?)');
+  const insertUser = db.prepare('INSERT INTO users (nickname, display_name) VALUES (?, ?)');
   const insertTotp = db.prepare(
     'INSERT INTO totp (user_id, secret, enabled) VALUES (?, ?, 0)'
   );
   const selectUser = db.prepare(
-    'SELECT id, nickname, created_at FROM users WHERE id = ?'
+    'SELECT id, nickname, display_name, avatar_url, created_at FROM users WHERE id = ?'
   );
 
   const createTx = db.transaction((nicknameValue, secretValue) => {
-    const info = insertUser.run(nicknameValue);
+    const info = insertUser.run(nicknameValue, nicknameValue);
     insertTotp.run(info.lastInsertRowid, secretValue);
     return selectUser.get(info.lastInsertRowid);
   });
@@ -223,13 +255,25 @@ function isChatMember(db, chatId, userId) {
   return Boolean(row);
 }
 
+function listChatMemberUserIds(db, chatId) {
+  return db
+    .prepare('SELECT user_id FROM chat_members WHERE chat_id = ?')
+    .all(chatId)
+    .map((row) => row.user_id);
+}
+
 function listMessagesByChat(db, chatId, limit = 50) {
   return db
     .prepare(
-      `SELECT id, chat_id, sender_user_id, sender_device_id, sent_at, ciphertext, nonce, meta_json
-       FROM messages
-       WHERE chat_id = ?
-       ORDER BY sent_at DESC
+      `SELECT m.id, m.chat_id, m.sender_user_id, m.sender_device_id, m.sent_at,
+              m.ciphertext, m.nonce, m.meta_json,
+              u.nickname AS sender_nickname,
+              u.display_name AS sender_display_name,
+              u.avatar_url AS sender_avatar_url
+       FROM messages m
+       LEFT JOIN users u ON u.id = m.sender_user_id
+       WHERE m.chat_id = ?
+       ORDER BY m.sent_at DESC
        LIMIT ?`
     )
     .all(chatId, limit);
@@ -240,6 +284,8 @@ function listChatsByUserId(db, userId) {
     .prepare(
       `SELECT cm.chat_id AS chat_id,
               u.nickname AS peer_nickname,
+              u.display_name AS peer_display_name,
+              u.avatar_url AS peer_avatar_url,
               MAX(m.sent_at) AS last_message_at
        FROM chat_members cm
        JOIN users u ON u.id = cm.user_id
@@ -412,6 +458,9 @@ module.exports = {
   findDirectChatId,
   ensureDirectChat,
   getUserByNickname,
+  getUserById,
+  updateUserProfile,
+  createUser,
   createUserWithTotp,
   getTotpByUserId,
   enableTotp,
@@ -422,6 +471,7 @@ module.exports = {
   createMessage,
   ensureChatMember,
   isChatMember,
+  listChatMemberUserIds,
   listMessagesByChat,
   listChatsByUserId,
   deleteChatMembersByUser,
